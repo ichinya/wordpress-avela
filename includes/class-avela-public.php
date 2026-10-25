@@ -7,6 +7,8 @@ final class Avela_Public {
         if ( ! is_admin() && ! defined( 'DONOTCACHEPAGE' ) ) {
             define( 'DONOTCACHEPAGE', true );
         }
+        add_action( 'init', array( __CLASS__, 'prepare_request' ), -10000 );
+        add_filter( 'wp_headers', array( __CLASS__, 'headers' ), PHP_INT_MAX );
         add_action( 'send_headers', array( __CLASS__, 'no_cache' ) );
         add_filter( 'rest_post_dispatch', array( __CLASS__, 'rest_headers' ), PHP_INT_MAX, 3 );
         add_filter( 'the_posts', array( __CLASS__, 'posts' ), PHP_INT_MAX, 2 );
@@ -20,7 +22,9 @@ final class Avela_Public {
         add_filter( 'post_thumbnail_html', array( __CLASS__, 'thumbnail' ), PHP_INT_MAX, 2 );
         add_filter( 'wp_get_attachment_image', array( __CLASS__, 'image' ), PHP_INT_MAX, 2 );
         add_filter( 'wp_get_attachment_image_src', array( __CLASS__, 'image_src' ), PHP_INT_MAX, 2 );
+        add_filter( 'wp_prepare_attachment_for_js', array( __CLASS__, 'media_js' ), PHP_INT_MAX, 2 );
         add_filter( 'pre_get_posts', array( __CLASS__, 'query' ) );
+        add_filter( 'posts_where', array( __CLASS__, 'media_where' ), PHP_INT_MAX, 2 );
         add_filter( 'posts_search', array( __CLASS__, 'search' ), PHP_INT_MAX, 2 );
         add_filter( 'comments_clauses', array( __CLASS__, 'comments_sql' ), PHP_INT_MAX, 2 );
         add_filter( 'comment_feed_where', array( __CLASS__, 'comment_feed_sql' ) );
@@ -53,11 +57,35 @@ final class Avela_Public {
         add_filter( 'rank_math/sitemap/urlimages', array( __CLASS__, 'sitemap_images' ), PHP_INT_MAX, 2 );
     }
 
+    public static function prepare_request() {
+        if ( ! is_admin() ) {
+            // WP can exit with 304 before send_headers/template_redirect, reusing an old public body.
+            unset( $_SERVER['HTTP_IF_NONE_MATCH'], $_SERVER['HTTP_IF_MODIFIED_SINCE'] );
+        }
+    }
+
+    public static function headers( $headers ) {
+        if ( ! is_admin() ) {
+            $headers = array_merge( $headers, wp_get_nocache_headers() );
+            $headers['Cache-Control'] = 'private, no-store, no-cache, must-revalidate, max-age=0';
+            $headers['Vary'] = isset( $headers['Vary'] ) ? $headers['Vary'] . ', Cookie' : 'Cookie';
+            unset( $headers['ETag'] );
+        }
+        return $headers;
+    }
+
     public static function no_cache() {
-        if ( ! is_admin() && ! headers_sent() ) {
+        if ( ! is_admin() ) {
+            self::private_headers();
+        }
+    }
+
+    public static function private_headers() {
+        if ( ! headers_sent() ) {
             nocache_headers();
             header( 'Cache-Control: private, no-store, no-cache, must-revalidate, max-age=0' );
             header( 'Vary: Cookie', false );
+            header_remove( 'ETag' );
         }
     }
 
@@ -120,9 +148,12 @@ final class Avela_Public {
             return $content;
         }
         if ( self::locked( $id ) ) {
-            return self::public_html( $id, is_singular() && ! is_feed() && ! is_embed() );
+            // Do not execute even public teaser/template shortcodes in intermediate filters.
+            return PHP_INT_MAX === avela_current_filter_priority()
+                ? self::public_html( $id, is_singular() && ! is_feed() && ! is_embed() ) : '';
         }
-        if ( PHP_INT_MAX === avela_current_filter_priority() ) {
+        if ( PHP_INT_MAX === avela_current_filter_priority() && is_singular() && ! is_feed() && ! is_embed()
+            && ! ( defined( 'REST_REQUEST' ) && REST_REQUEST ) ) {
             return $content . ( Avela::settings()['reset'] ? self::form( $id, 'reset', 'Скрыть материал' ) : '' );
         }
         return $content;
@@ -151,19 +182,32 @@ final class Avela_Public {
     }
 
     public static function image( $html, $id ) {
-        return Avela_Media::hidden( $id ) ? '' : $html;
+        return ! Avela_Media::building() && Avela_Media::hidden( $id ) ? '' : $html;
     }
 
     public static function image_src( $src, $id ) {
-        return Avela_Media::hidden( $id ) ? false : $src;
+        return ! Avela_Media::building() && Avela_Media::hidden( $id ) ? false : $src;
+    }
+
+    public static function media_js( $data, $attachment ) {
+        return Avela_Media::hidden( $attachment->ID ) ? null : $data;
     }
 
     public static function query( $query ) {
-        if ( Avela_Media::building() || is_admin() ) {
+        if ( Avela_Media::building() ) {
+            return;
+        }
+        if ( 'attachment' === $query->get( 'post_type' ) && Avela_Media::unresolved() ) {
+            $query->set( 'post__in', array( 0 ) );
             return;
         }
         $blocked = Avela_Media::blocked_ids();
         if ( $blocked ) {
+            $include = $query->get( 'post__in' );
+            if ( $include ) {
+                $include = array_values( array_diff( wp_parse_id_list( $include ), $blocked ) );
+                $query->set( 'post__in', $include ?: array( 0 ) );
+            }
             $query->set( 'post__not_in', array_unique( array_merge( (array) $query->get( 'post__not_in' ), $blocked ) ) );
         }
     }
@@ -176,6 +220,19 @@ final class Avela_Public {
             }
         }
         return $ids;
+    }
+
+    public static function media_where( $where, $query ) {
+        global $wpdb;
+        if ( Avela_Media::building() ) {
+            return $where;
+        }
+        if ( Avela_Media::unresolved() ) {
+            return $where . " AND {$wpdb->posts}.post_type <> 'attachment'";
+        }
+        $blocked = Avela_Media::blocked_ids();
+        // Unlike post__not_in, this still applies when WP_Query also has post__in.
+        return $blocked ? $where . " AND {$wpdb->posts}.ID NOT IN (" . implode( ',', array_map( 'absint', $blocked ) ) . ')' : $where;
     }
 
     public static function search( $search, $query ) {
@@ -267,31 +324,47 @@ final class Avela_Public {
     public static function strip_media_html( $html ) {
         // Themes can use raw first-image fallbacks instead of WordPress thumbnail APIs.
         // Remove known closed media from those tags too, before the response is sent.
-        $stems = array();
-        foreach ( Avela_Media::index() as $id => $entry ) {
-            if ( ! self::locked( $id ) ) {
-                continue;
-            }
-            foreach ( $entry['urls'] as $url ) {
-                $path = wp_parse_url( $url, PHP_URL_PATH );
-                if ( $path ) {
-                    $stems[] = preg_replace( '/(?:-\d+x\d+|-scaled|-rotated)?\.[^.\/]+$/', '', $path );
-                }
-            }
-        }
-        if ( ! $stems ) {
+        $unresolved = Avela_Media::unresolved();
+        if ( ! Avela_Media::index() ) {
             return $html;
         }
-        $stems = array_unique( $stems );
-        return preg_replace_callback( '~<(?:img|source|link)\b(?:"[^"]*"|\x27[^\x27]*\x27|[^\x27">])*>~i', function ( $match ) use ( $stems ) {
-            $tag = html_entity_decode( $match[0], ENT_QUOTES | ENT_HTML5, 'UTF-8' );
-            foreach ( $stems as $stem ) {
-                if ( false !== strpos( $tag, $stem ) ) {
+        $filtered = preg_replace_callback( '~<(?:img|source|link|meta|video|audio|iframe|embed|object)\b(?:"[^"]*"|\x27[^\x27]*\x27|[^\x27">])*>~i', function ( $match ) use ( $unresolved ) {
+            $processor = new WP_HTML_Tag_Processor( $match[0] );
+            $processor->next_tag();
+            $tag = $processor->get_tag();
+            $metadata = 'META' === $tag;
+            if ( $metadata && ! preg_match( '/(?:^|:)image(?:$|:)/i', (string) ( $processor->get_attribute( 'property' ) ?: $processor->get_attribute( 'name' ) ) ) ) {
+                return $match[0];
+            }
+            if ( $unresolved && in_array( $tag, array( 'IMG', 'SOURCE', 'VIDEO', 'AUDIO', 'IFRAME', 'EMBED', 'OBJECT' ), true ) ) {
+                return '';
+            }
+            foreach ( array( 'src', 'href', 'poster', 'data', 'data-src', 'content' ) as $attr ) {
+                $url = $processor->get_attribute( $attr );
+                if ( is_string( $url ) && Avela_Media::restricted_url( $url, $metadata ) ) {
                     return '';
+                }
+            }
+            foreach ( array( 'srcset', 'imagesrcset', 'data-srcset' ) as $attr ) {
+                $srcset = $processor->get_attribute( $attr );
+                if ( is_string( $srcset ) ) {
+                    foreach ( explode( ',', $srcset ) as $candidate ) {
+                        if ( Avela_Media::restricted_url( preg_split( '/\s+/', trim( $candidate ) )[0], $metadata ) ) {
+                            return '';
+                        }
+                    }
                 }
             }
             return $match[0];
         }, $html );
+        // PCRE failure must not return unfiltered HTML or an empty successful page.
+        if ( null === $filtered ) {
+            if ( ! headers_sent() ) {
+                status_header( 503 );
+            }
+            return '<p>Не удалось безопасно подготовить страницу. Обновите её позже.</p>';
+        }
+        return $filtered;
     }
 
     public static function head() {
@@ -317,10 +390,10 @@ final class Avela_Public {
 
     public static function rest_guard( $result, $server, $request ) {
         $route = $request->get_route();
-        if ( preg_match( '~^/wp/v2/media/(\d+)(?:/|$)~', $route, $m ) && Avela_Media::hidden( (int) $m[1] ) ) {
+        if ( preg_match( '~^/wp/v2/media/(\d+)(?:/|$)~i', $route, $m ) && Avela_Media::hidden( (int) $m[1] ) ) {
             return new WP_Error( 'avela_media_locked', 'Медиа недоступно без подтверждения.', array( 'status' => 403 ) );
         }
-        if ( preg_match( '~^/wp/v2/comments/(\d+)(?:/|$)~', $route, $m ) ) {
+        if ( preg_match( '~^/wp/v2/comments/(\d+)(?:/|$)~i', $route, $m ) ) {
             $comment = get_comment( (int) $m[1] );
             if ( $comment && self::locked( $comment->comment_post_ID ) ) {
                 return new WP_Error( 'avela_comment_locked', 'Комментарии недоступны без подтверждения.', array( 'status' => 403 ) );
@@ -331,6 +404,19 @@ final class Avela_Public {
 
     public static function rest_post( $response, $post, $request ) {
         if ( ! self::locked( $post->ID ) ) {
+            if ( ! Avela_Access::editing( $post->ID ) ) {
+                $data = $response->get_data();
+                foreach ( array( 'content', 'excerpt' ) as $key ) {
+                    if ( isset( $data[ $key ]['rendered'] ) ) {
+                        $data[ $key ]['rendered'] = self::strip_media_html( $data[ $key ]['rendered'] );
+                    }
+                }
+                if ( ! empty( $data['featured_media'] ) && Avela_Media::hidden( $data['featured_media'] ) ) {
+                    $data['featured_media'] = 0;
+                    $response->remove_link( 'wp:featuredmedia' );
+                }
+                $response->set_data( $data );
+            }
             return $response;
         }
         $data = $response->get_data();
@@ -373,15 +459,39 @@ final class Avela_Public {
     }
 
     public static function seo_image( $image ) {
-        return is_singular() && Avela_Access::restricted( get_queried_object_id() ) ? '' : $image;
+        return ( is_singular() && Avela_Access::restricted( get_queried_object_id() ) ) || Avela_Media::restricted_url( $image, true ) ? '' : $image;
     }
 
     public static function schema( $data ) {
-        return is_singular() && Avela_Access::restricted( get_queried_object_id() ) ? array() : $data;
+        if ( is_singular() && Avela_Access::restricted( get_queried_object_id() ) ) {
+            return array();
+        }
+        return self::safe_schema( $data );
+    }
+
+    private static function safe_schema( $data ) {
+        if ( ! is_array( $data ) ) {
+            return is_string( $data ) && Avela_Media::restricted_url( $data, true ) ? null : $data;
+        }
+        foreach ( $data as $key => $value ) {
+            $clean = self::safe_schema( $value );
+            if ( null === $clean ) {
+                unset( $data[ $key ] );
+            } else {
+                $data[ $key ] = $clean;
+            }
+        }
+        return $data;
     }
 
     public static function sitemap_images( $images, $id ) {
-        return Avela_Access::restricted( is_object( $id ) ? $id->ID : $id ) ? array() : $images;
+        if ( Avela_Access::restricted( is_object( $id ) ? $id->ID : $id ) ) {
+            return array();
+        }
+        return array_values( array_filter( $images, function ( $image ) {
+            $url = is_array( $image ) ? ( $image['src'] ?? $image['loc'] ?? '' ) : $image;
+            return ! Avela_Media::restricted_url( $url, true );
+        } ) );
     }
 }
 

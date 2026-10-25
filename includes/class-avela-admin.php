@@ -8,6 +8,7 @@ final class Avela_Admin {
         add_action( 'admin_menu', array( __CLASS__, 'menu' ) );
         add_action( 'admin_init', array( __CLASS__, 'settings' ) );
         add_action( 'admin_notices', array( __CLASS__, 'notices' ) );
+        add_action( 'admin_post_avela_rebuild', array( __CLASS__, 'rebuild' ) );
         add_filter( 'manage_post_posts_columns', array( __CLASS__, 'columns' ) );
         add_action( 'manage_post_posts_custom_column', array( __CLASS__, 'column' ), 10, 2 );
         add_filter( 'plugin_action_links_' . plugin_basename( AVELA_DIR . 'avela.php' ), array( __CLASS__, 'links' ) );
@@ -59,6 +60,9 @@ final class Avela_Admin {
                 if ( count( Avela_Media::owners( $id ) ) > 1 ) {
                     echo '<p style="color:#996800">Медиа №' . absint( $id ) . ' связано с несколькими закрытыми статьями. Снятие одного предупреждения не снимет остальные ограничения.</p>';
                 }
+                foreach ( Avela_Media::public_uses( $id, $post->ID ) as $public_id ) {
+                    echo '<p style="color:#996800">Медиа №' . absint( $id ) . ' также используется в открытом материале «' . esc_html( get_the_title( $public_id ) ) . '». Ограничение затронет его изображение; выберите отдельный файл для открытой статьи.</p>';
+                }
             }
         }
     }
@@ -86,20 +90,53 @@ final class Avela_Admin {
         }
         if ( 'avela_warning' === $post->post_type && current_user_can( 'manage_options' ) ) {
             foreach ( array( 'heading', 'confirm', 'exit_label', 'exit_url' ) as $field ) {
+                if ( ! isset( $_POST[ 'avela_' . $field ] ) || ! is_string( $_POST[ 'avela_' . $field ] ) ) {
+                    continue;
+                }
                 $value = sanitize_text_field( wp_unslash( $_POST[ 'avela_' . $field ] ?? '' ) );
                 update_post_meta( $id, '_avela_' . $field, 'exit_url' === $field ? Avela_Access::safe_exit( $value ) : $value );
             }
-            update_post_meta( $id, '_avela_revision', wp_generate_uuid4() );
+            $version = array( $post->post_content );
+            foreach ( array( 'heading', 'confirm', 'exit_label', 'exit_url' ) as $field ) {
+                $version[] = get_post_meta( $id, '_avela_' . $field, true );
+            }
+            update_post_meta( $id, '_avela_revision', substr( hash( 'sha256', wp_json_encode( $version ) ), 0, 16 ) );
             Avela::purge();
         } elseif ( in_array( $post->post_type, array( 'post', 'page' ), true ) ) {
-            update_post_meta( $id, '_avela_warning', absint( $_POST['avela_warning'] ?? 0 ) );
-            update_post_meta( $id, '_avela_teaser', sanitize_textarea_field( wp_unslash( $_POST['avela_teaser'] ?? '' ) ) );
-            update_post_meta( $id, '_avela_adult', empty( $_POST['avela_adult'] ) ? 0 : 1 );
+            // Only an explicit canonical zero removes a warning. Missing/broken fields preserve it.
+            $warning = $_POST['avela_warning'] ?? null;
+            if ( is_string( $warning ) && preg_match( '/^(?:0|[1-9][0-9]*)$/D', $warning ) ) {
+                update_post_meta( $id, '_avela_warning', absint( $warning ) );
+            } elseif ( null !== $warning && ! Avela_Access::restricted( $id ) ) {
+                // A malformed non-empty selection on a new post must not publish it unguarded.
+                update_post_meta( $id, '_avela_warning', 'invalid' );
+            }
+            if ( isset( $_POST['avela_teaser'] ) && is_string( $_POST['avela_teaser'] ) ) {
+                update_post_meta( $id, '_avela_teaser', sanitize_textarea_field( wp_unslash( $_POST['avela_teaser'] ) ) );
+            }
+            if ( is_string( $warning ) && preg_match( '/^(?:0|[1-9][0-9]*)$/D', $warning ) ) {
+                update_post_meta( $id, '_avela_adult', isset( $_POST['avela_adult'] ) && '1' === $_POST['avela_adult'] ? 1 : 0 );
+            }
         }
     }
 
     public static function menu() {
         add_submenu_page( 'edit.php?post_type=avela_warning', 'Настройки Avela', 'Настройки и диагностика', 'manage_options', 'avela', array( __CLASS__, 'page' ) );
+    }
+
+    public static function rebuild() {
+        Avela_Public::private_headers();
+        if ( 'POST' !== ( $_SERVER['REQUEST_METHOD'] ?? '' ) ) {
+            wp_die( 'Требуется отправка формы.', 'Avela', array( 'response' => 405 ) );
+        }
+        if ( ! current_user_can( 'manage_options' ) ) {
+            wp_die( 'Недостаточно прав.', 'Avela', array( 'response' => 403 ) );
+        }
+        check_admin_referer( 'avela_rebuild' );
+        Avela_Media::rebuild();
+        Avela::purge();
+        wp_safe_redirect( admin_url( 'edit.php?post_type=avela_warning&page=avela' ), 303 );
+        exit;
     }
 
     public static function settings() {
@@ -135,6 +172,10 @@ final class Avela_Admin {
         echo '</form><hr><h2>Кеш и поисковые роботы</h2><p>Публичные ответы имеют <code>private, no-store</code> и <code>DONOTCACHEPAGE</code>. Общий HTML-кеш и CDN необходимо отключить или настроить до выпуска. Кеш, отвечающий до загрузки WordPress, не контролируется этим плагином. Очистите уже созданные копии при включении предупреждений.</p>';
         echo '<p>Индексируются заголовок и ручной анонс. Прямые файлы по известному URL доступны. Правила robots ограничивают обход, а не доступ человека.</p>';
         echo '<p>Статей с предупреждением: <strong>' . count( Avela_Media::index() ) . '</strong>. <a href="' . esc_url( home_url( '/robots.txt' ) ) . '" target="_blank" rel="noopener">Проверить robots.txt</a></p>';
+        echo '<form method="post" action="' . esc_url( admin_url( 'admin-post.php' ) ) . '"><input type="hidden" name="action" value="avela_rebuild">';
+        wp_nonce_field( 'avela_rebuild' );
+        submit_button( 'Пересобрать реестр медиа и очистить кеш', 'secondary', 'submit', false );
+        echo '</form>';
         foreach ( Avela_Media::rules() as $host => $rules ) {
             echo '<h3>' . esc_html( $host ) . '</h3><p>' . ( strtolower( (string) wp_parse_url( home_url(), PHP_URL_HOST ) ) === $host ? 'Добавляется в виртуальный robots.txt WordPress.' : 'Внешний хост: перенесите эти правила в его robots.txt или настройте X-Robots-Tag на сервере файлов.' ) . '</p>';
             echo '<textarea class="large-text code" rows="6" readonly>' . esc_textarea( "User-agent: *\n" . implode( "\n", $rules ) ) . '</textarea>';
@@ -151,6 +192,12 @@ final class Avela_Admin {
         }
         if ( file_exists( ABSPATH . 'robots.txt' ) ) {
             echo '<div class="notice notice-warning"><p><strong>Avela:</strong> физический robots.txt перекрывает правила WordPress. Перенесите правила из настроек Avela в этот файл.</p></div>';
+        }
+        foreach ( Avela_Media::index() as $entry ) {
+            if ( empty( $entry['ready'] ) ) {
+                echo '<div class="notice notice-error"><p><strong>Avela:</strong> реестр медиа не готов. Публичная выдача медиа временно закрыта; для uploads действуют консервативные правила robots. Пересоберите реестр в настройках Avela и проверьте ошибки записи БД/адаптеров.</p></div>';
+                break;
+            }
         }
     }
 

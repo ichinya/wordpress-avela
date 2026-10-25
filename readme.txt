@@ -2,7 +2,7 @@
 Contributors: ichinya
 Requires at least: 6.4
 Requires PHP: 7.4
-Stable tag: 0.1.0
+Stable tag: 0.1.1
 License: GPL-2.0-or-later
 License URI: https://www.gnu.org/licenses/gpl-2.0.html
 
@@ -20,5 +20,8 @@ License URI: https://www.gnu.org/licenses/gpl-2.0.html
 4. Отключите общий HTML-кеш и проверьте robots.txt по инструкции README.md.
 
 == Changelog ==
+= 0.1.1 =
+Исправлены гонки и потеря реестра медиа, обходы коллекций и галерей, условные ответы 304, обработка повреждённых форм и провайдеров. Результат возраста отделён от принятия предупреждения. Добавлены диагностика и пересборка реестра.
+
 = 0.1.0 =
 Первая версия: шаблоны, анонсы, подтверждение, ограничения публичной выдачи и реестр медиа.

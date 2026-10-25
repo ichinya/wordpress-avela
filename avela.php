@@ -2,7 +2,7 @@
 /**
  * Plugin Name: Avela — предупреждения перед чтением
  * Description: Публичные анонсы и серверное подтверждение предупреждений перед открытием статей.
- * Version: 0.1.0
+ * Version: 0.1.1
  * Requires at least: 6.4
  * Requires PHP: 7.4
  * Author: Ichi-nya
@@ -10,7 +10,7 @@
  * Text Domain: avela
  */
 defined( 'ABSPATH' ) || exit;
-define( 'AVELA_VERSION', '0.1.0' );
+define( 'AVELA_VERSION', '0.1.1' );
 define( 'AVELA_DIR', plugin_dir_path( __FILE__ ) );
 foreach ( array( 'access', 'media', 'public', 'admin' ) as $avela_component ) {
     require_once AVELA_DIR . 'includes/class-avela-' . $avela_component . '.php';
@@ -55,7 +55,17 @@ final class Avela {
             update_option( 'avela_installed', 1, false );
         }
         Avela_Media::rebuild();
+        update_option( 'avela_schema_version', 2, false );
         self::purge();
+    }
+
+    public static function upgrade() {
+        if ( 2 !== (int) get_option( 'avela_schema_version', 0 ) ) {
+            Avela_Media::rebuild();
+            delete_option( 'avela_media_index' );
+            update_option( 'avela_schema_version', 2, false );
+            self::purge();
+        }
     }
 
     public static function purge() {
@@ -70,6 +80,7 @@ final class Avela {
     }
 }
 add_action( 'init', array( 'Avela', 'register' ) );
+add_action( 'init', array( 'Avela', 'upgrade' ), 20 );
 register_activation_hook( __FILE__, array( 'Avela', 'activate' ) );
 Avela_Access::hooks();
 Avela_Media::hooks();
