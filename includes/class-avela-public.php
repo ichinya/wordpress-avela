@@ -129,9 +129,9 @@ final class Avela_Public {
             . '<span class="avela-badge">18+ · Запрещено для детей</span>'
             . '<h2 id="avela-heading-' . absint( $id ) . '">' . esc_html( $w['heading'] ) . '</h2>'
             . '<div class="avela-message">' . wpautop( wp_kses( $w['body'], Avela_Admin::allowed_html() ) ) . '</div>'
-            . '<div class="avela-actions">' . self::form( $id, 'confirm', $w['confirm'] )
-            . '<a class="avela-exit" rel="nofollow" href="' . esc_url( $w['exit_url'] ) . '">' . esc_html( $w['exit_label'] ) . '</a></div>'
-            . '<p class="avela-note">Кнопка фиксирует ваше заявление о возрасте. Для открытия нужны cookie.</p></section>';
+            . '<div class="avela-actions"><a class="avela-exit" rel="nofollow" href="' . esc_url( $w['exit_url'] ) . '">' . esc_html( $w['exit_label'] ) . '</a>'
+            . self::form( $id, 'confirm', $w['confirm'] ) . '</div>'
+            . '<p class="avela-note">Подтверждение фиксирует ваше заявление о возрасте. Для открытия нужны cookie.</p></section>';
     }
 
     public static function public_html( $id, $gate = true ) {

@@ -2,7 +2,7 @@
 /**
  * Plugin Name: Avela — предупреждения перед чтением
  * Description: Публичные анонсы и серверное подтверждение предупреждений перед открытием статей.
- * Version: 0.1.1
+ * Version: 0.1.2
  * Requires at least: 6.4
  * Requires PHP: 7.4
  * Author: Ichi-nya
@@ -10,7 +10,7 @@
  * Text Domain: avela
  */
 defined( 'ABSPATH' ) || exit;
-define( 'AVELA_VERSION', '0.1.1' );
+define( 'AVELA_VERSION', '0.1.2' );
 define( 'AVELA_DIR', plugin_dir_path( __FILE__ ) );
 foreach ( array( 'access', 'media', 'public', 'admin' ) as $avela_component ) {
     require_once AVELA_DIR . 'includes/class-avela-' . $avela_component . '.php';
